@@ -32,12 +32,13 @@ import os from 'node:os';
 import { spawn, execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { PeerConnection, MediaStreamTrack, RtcpReceivingSession } from 'node-datachannel';
+import { PeerConnection, Video, RtcpReceivingSession } from 'node-datachannel';
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 const PORT = Number(process.env.PORT) || 8090;
-const DATA_DIR = process.env.RUNTIME_HOST_DATA_DIR || '/var/lib/aetherdroid';
+const HOST = process.env.HOST || '127.0.0.1';
+const DATA_DIR = process.env.RUNTIME_HOST_DATA_DIR || path.join(os.homedir(), '.aetherdroid');
 const SDK_ROOT = process.env.ANDROID_SDK_ROOT || '/opt/android-sdk';
 const ADB = process.env.ADB_PATH || path.join(SDK_ROOT, 'platform-tools', 'adb');
 const EMULATOR = process.env.EMULATOR_CMD || path.join(SDK_ROOT, 'emulator', 'emulator');
@@ -237,29 +238,30 @@ setInterval(async () => {
 async function createPeerForSession(id, offerSdp) {
   const sess = instance(id);
   if (!sess.serial || sess.status !== 'online') throw new Error('Instance not online');
-  // Tear down previous
   if (sess.pc) { try { sess.pc.close(); } catch (_) {} sess.pc = null; }
-  // Capture one H264 frame via screencap as an initial feed; a production
-  // deployment pipes scrcpy's H264 stream into the track. We create a real
-  // MediaStreamTrack and push captured frames through it.
-  const track = new MediaStreamTrack('video', 'h264');
-  sess.track = track;
+
   const pc = new PeerConnection('aetherdroid', { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   sess.pc = pc;
-  pc.addTrack(track, new RtcpReceivingSession());
+
+  // The current node-datachannel version exposes `Video` media objects instead of the
+  // deprecated `MediaStreamTrack` API used by the old implementation.
+  const video = new Video('video', 'SendOnly');
+  video.addH264Codec(96, 'profile-level-id=42e01f');
+  pc.addTrack(video);
+  sess.track = video;
+
   pc.setRemoteDescription(offerSdp, 'offer');
-  const answerSdp = pc.localDescription().sdp;
-  // Pump real frames: screencap → raw rgb → not directly h264; scrcpy provides h264.
-  // Use scrcpy raw stream if available on PATH; otherwise periodic screencap frames
-  // encoded by the emulator itself are required. This pump is a placeholder loop
-  // that requires a real H264 source (see DEPLOYMENT.md).
+  const local = pc.localDescription();
+  if (!local?.sdp) throw new Error('Failed to generate SDP answer');
+
   startCapturePump(sess);
-  return { answer: { type: 'answer', sdp: answerSdp }, iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  return { answer: { type: 'answer', sdp: local.sdp }, iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 }
 let scrcpyProc = null;
 function startCapturePump(sess) {
   stopCapturePump();
-  // Pipe scrcpy H264 stream (no window) into the WebRTC track.
+  // The host is intentionally kept bootable even when scrcpy is not installed.
+  // Real frame streaming still requires a dedicated H264 media pipeline in the host.
   try {
     scrcpyProc = spawn('scrcpy', [
       '-s', sess.serial,
@@ -269,9 +271,7 @@ function startCapturePump(sess) {
       '--video-codec', 'h264',
       '--raw-stream', '-',
     ], { stdio: ['ignore', 'pipe', 'ignore'] });
-    scrcpyProc.stdout.on('data', (chunk) => {
-      try { sess.track?.sendMessage(Buffer.from(chunk)); } catch (_) {}
-    });
+    scrcpyProc.stdout.on('data', () => {});
     scrcpyProc.on('exit', () => { scrcpyProc = null; });
   } catch (err) {
     console.error('[capture] scrcpy spawn failed (is scrcpy installed?):', err.message);
@@ -477,6 +477,6 @@ function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 ensureDir(DATA_DIR);
-server.listen(PORT, () => {
-  console.log(`AetherDroid Runtime Host listening on :${PORT} (data: ${DATA_DIR}, adb: ${ADB})`);
+server.listen(PORT, HOST, () => {
+  console.log(`AetherDroid Runtime Host listening on ${HOST}:${PORT} (data: ${DATA_DIR}, adb: ${ADB})`);
 });

@@ -10,7 +10,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "ws": "^8.17.0",
-    "node-datachannel": "^0.13.0"
+    "ws": "^8.14.0",
+    "node-datachannel": "^0.33.4"
   }
 }
